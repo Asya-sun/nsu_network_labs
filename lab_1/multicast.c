@@ -14,6 +14,9 @@
 #define BUFF_SIZE 256
 
 
+//1 порт для получения
+//разные порты для отправки
+
 typedef struct  {
     int is_ipv6;
     char *multicast_ip;
@@ -23,41 +26,25 @@ typedef struct  {
 } thread_args;
 
 
+char *get_ip_str(const struct sockaddr *sa, char *s, size_t maxlen)
+{
+    switch(sa->sa_family) {
+        case AF_INET:
+            inet_ntop(AF_INET, &(((struct sockaddr_in *)sa)->sin_addr),
+                    s, maxlen);
+            break;
 
-void join_multicast_group(int sockfd, const char *multicast_addr, int is_ipv6) {
-    if (is_ipv6) {
-        struct sockaddr_in6 group_addr;
-        struct ipv6_mreq mreq;
+        case AF_INET6:
+            inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)sa)->sin6_addr),
+                    s, maxlen);
+            break;
 
-        memset(&group_addr, 0, sizeof(group_addr));
-        group_addr.sin6_family = AF_INET6;
-        inet_pton(AF_INET6, multicast_addr, &group_addr.sin6_addr);
-        
-        mreq.ipv6mr_multiaddr = group_addr.sin6_addr;
-        mreq.ipv6mr_interface = 0;
-
-        // add to the group
-        if (setsockopt(sockfd, IPPROTO_IPV6, IPV6_JOIN_GROUP, (void*)&mreq, sizeof(mreq)) < 0) {
-            perror("setsockopt IPV6_JOIN_GROUP");
-            exit(1);
-        }
-    } else {
-        struct sockaddr_in group_addr;
-        struct ip_mreq mreq;
-
-        memset(&group_addr, 0, sizeof(group_addr));
-        group_addr.sin_family = AF_INET;
-        inet_pton(AF_INET, multicast_addr, &group_addr.sin_addr);
-        
-        mreq.imr_multiaddr = group_addr.sin_addr;
-        mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-
-        // add to the group
-        if (setsockopt(sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (void*)&mreq, sizeof(mreq)) < 0) {
-            perror("setsockopt IP_ADD_MEMBERSHIP");
-            exit(1);
-        }
+        default:
+            strncpy(s, "Unknown AF", maxlen);
+            return NULL;
     }
+
+    return s;
 }
 
 
@@ -66,8 +53,6 @@ void *send_messages(void *_args) {
     int error_check;
 
     thread_args *args = (thread_args *) _args;
-    printf("args->multicast_ip: %s\n", args->multicast_ip);
-    char *multicast_ip = args->multicast_ip;
 
     socklen_t len = args->is_ipv6 ? sizeof(*(args->multicast_addr6)) : sizeof(*(args->multicast_addr));
     struct sockaddr *to = args->is_ipv6 ? (struct sockaddr *) (args->multicast_addr6) : (struct sockaddr *) (args->multicast_addr);
@@ -77,27 +62,18 @@ void *send_messages(void *_args) {
         memset(buffer, 0, BUFF_SIZE);
 
         int my_pid = getpid();
-        int num_of_el = 0;
-        for (int i = 0; my_pid != 0; ++i) {
-            num_of_el++;
-            my_pid /= 10;
-        }
 
-        my_pid = getpid();
-        printf("line: %d my_pid: %d\n", __LINE__, my_pid);
-        for (int i = num_of_el - 1; i >= 0; i--) {
-            buffer[i] = my_pid % 10 + '0';
-            my_pid /=10;
-        }
-        buffer[num_of_el] = '\0';
 
-        error_check = sendto(args->socket_fd, buffer, strlen(buffer) + 1, 0, to, len) ;
+        sprintf(buffer, "%d", my_pid);
+
+        error_check = sendto(args->socket_fd, buffer, strlen(buffer) + 1, 0, (struct sockaddr *) to, len) ;
         if (error_check == -1) {
             printf("read error: %s\n", strerror(errno));
             close(args->socket_fd);
             exit(1);
         } else {
-            printf("buffer was written to sender_sockaddr line:%d\n\t buffer:%swas sent bytes: %d\n", __LINE__, buffer, error_check);
+            printf("sent message: %s\n", buffer);
+            //printf("buffer was written to sender_sockaddr line:%d\n\t buffer: %s was sent bytes: %d\n", __LINE__, buffer, error_check);
 
         }
         sleep(1);
@@ -112,31 +88,34 @@ void *receive_messages(void *_args) {
     char *multicast_ip = args->multicast_ip;
     char buffer[BUFF_SIZE];
 
-    socklen_t len = args->is_ipv6 ? sizeof(*(args->multicast_addr6)) : sizeof(*(args->multicast_addr));
-    struct sockaddr *from = args->is_ipv6 ? (struct sockaddr *) (args->multicast_addr6) : (struct sockaddr *) (args->multicast_addr);
+    char ip_buffer[BUFF_SIZE];
+    memset(ip_buffer, 0, BUFF_SIZE);
 
+
+    socklen_t len;
+    struct sockaddr from;
     while (1) {
+        len = 0;
+        memset(&from, 0, sizeof(struct sockaddr));
         memset(buffer, 0, BUFF_SIZE);
         printf("ready to hear messages\n");
-        
-        if (recvfrom(args->socket_fd, buffer, BUFF_SIZE, 0, from, &len) == -1) {
-            printf("fuck %d\n", __LINE__);
+
+
+        int nbytes = recvfrom(args->socket_fd, buffer, BUFF_SIZE, 0, &from, &len);
+        if ( nbytes == -1) {
             perror("recvfrom() failed");
             close(args->socket_fd);
             exit(1);
         }
 
+        
+        char *ip_recv = get_ip_str(&from, &(ip_buffer[0]), BUFF_SIZE);
 
+        printf("received message: %s ip_recv: %s\n", buffer, ip_buffer);
 
-        printf("received message: %s\n", buffer);
 
         int got_pid = 0;
-        for (int i = 0; i < BUFF_SIZE && buffer[i] != '\0'; ++i) {
-            got_pid *= 10;
-            got_pid += buffer[i];
-        }
-        printf("got pid: %d\n", got_pid);
-
+        got_pid = atoi(buffer);
 
         if (got_pid == getpid()) {
             printf("sucess!!!\n");
@@ -154,7 +133,7 @@ int validate_multicast(char *addr) {
     struct in_addr ipv4;
     struct in6_addr ipv6;
 
-    // Пif ipv4 is multicast
+    // if ipv4 is multicast
     if (inet_pton(AF_INET, addr, &ipv4) == 1) {
         if ((ntohl(ipv4.s_addr) & 0xF0000000) == 0xE0000000) {
             return 1;
@@ -207,30 +186,80 @@ int main(int argc, char *argv[ ]) {
 
 
     if (is_ipv6) {
+        // Настройка адреса для отправки
         args->multicast_addr6 = (struct sockaddr_in6 *) malloc(sizeof(struct sockaddr_in6));
         args->multicast_addr = NULL;
         memset(args->multicast_addr6, 0, sizeof(struct sockaddr_in6));
         args->multicast_addr6->sin6_family = AF_INET6;
         args->multicast_addr6->sin6_port = htons(PORT);
-        args->multicast_addr6->sin6_addr = in6addr_any;
+        //args->multicast_addr6->sin6_scope_id
+        inet_pton(AF_INET6, &(multicast_ip[0]), &((*(args->multicast_addr6)).sin6_addr));
 
-        bind(sckt, (struct sockaddr*)args->multicast_addr6, sizeof(args->multicast_addr6));
-        join_multicast_group(sckt, &(multicast_ip[0]), 1);
+        // Привязка сокета к любому адресу
+        struct sockaddr_in6 local_addr;
+        memset(&local_addr, 0, sizeof(local_addr));
+        local_addr.sin6_family = AF_INET6;
+        local_addr.sin6_addr = in6addr_any;
+        local_addr.sin6_port = htons(PORT);
+
+        if (bind(sckt, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0) {
+            perror("bind");
+            exit(1);
+        }
+
+
+        struct ipv6_mreq mreq;
+        
+        mreq.ipv6mr_multiaddr = args->multicast_addr6->sin6_addr;
+        inet_pton(AF_INET6, &(multicast_ip[0]), &mreq.ipv6mr_multiaddr);
+        mreq.ipv6mr_interface = 0;
+
+        // add to the group
+        if (setsockopt(sckt, IPPROTO_IPV6, IPV6_JOIN_GROUP , (void*)&mreq, sizeof(mreq)) < 0) {
+            perror("setsockopt IPV6_JOIN_GROUP");
+            exit(1);
+        }
     } else {
+
+        // Настройка адреса для отправки
         args->multicast_addr = (struct sockaddr_in *) malloc(sizeof(struct sockaddr_in));
         args->multicast_addr6 = NULL;
 
-        memset((args->multicast_addr), 0, sizeof(struct sockaddr));
+        memset((args->multicast_addr), 0, sizeof(struct sockaddr_in));
         args->multicast_addr->sin_family = AF_INET;
-        (*(args->multicast_addr)).sin_port = htons(PORT);
-        args->multicast_addr->sin_addr.s_addr = htonl(INADDR_ANY);
+        args->multicast_addr->sin_port = htons(PORT);
 
+        //inet_pton(AF_INET, &(multicast_ip[0]), &((*(args->multicast_addr)).sin_addr));
+        args->multicast_addr->sin_addr.s_addr = inet_addr(&(multicast_ip[0]));
+        bzero(&((*(args->multicast_addr)).sin_zero),8);
 
-        bind(sckt, (struct sockaddr*)args->multicast_addr, sizeof(args->multicast_addr));
-        join_multicast_group(sckt, &(multicast_ip[0]), 0);
+        // Привязка сокета к любому адресу
+        struct sockaddr_in local_addr;
+        memset(&local_addr, 0, sizeof(local_addr));
+        local_addr.sin_family = AF_INET;
+        local_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        local_addr.sin_port = htons(PORT);
+
+        if (bind(sckt, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0) {
+            perror("bind");
+            exit(1);
+        }
+
+        // Установка опции для присоединения к мульткаст-группе
+        // Для IPv4
+        struct ip_mreq mreq;
+        mreq.imr_multiaddr.s_addr = inet_addr(&(multicast_ip[0]));
+        mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+        
+        if (setsockopt(sckt, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char *)&mreq, sizeof(mreq)) < 0) {
+            perror("setsockopt");
+            exit(1);
+        }
     }
-    char buffer[BUFF_SIZE];
 
+    int sender_socket; //= receiver socket
+    char buffer[BUFF_SIZE];
+    
     pthread_t sender;
     pthread_t receiver;
 	int err;
